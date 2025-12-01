@@ -17,7 +17,6 @@ import {
 
 // --- FIREBASE CONFIGURATION ---
 const getFirebaseConfig = () => {
-  // 1. Check for preview environment config
   if (typeof window !== 'undefined' && (window as any).__firebase_config) {
     try {
       return JSON.parse((window as any).__firebase_config);
@@ -25,7 +24,6 @@ const getFirebaseConfig = () => {
       console.error("Config parse error", e);
     }
   }
-  // 2. Check for Vercel environment config
   if (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_FIREBASE_API_KEY) {
     return {
       apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -40,18 +38,16 @@ const getFirebaseConfig = () => {
 };
 
 const firebaseConfig = getFirebaseConfig();
-// Only initialize if we have a config, otherwise wait
 const app = (!getApps().length && firebaseConfig.apiKey) ? initializeApp(firebaseConfig) : (getApps().length ? getApp() : null);
 const auth = app ? getAuth(app) : null;
 const db = app ? getFirestore(app) : null;
 
-// --- APP ID SANITIZATION (The Fix) ---
+// --- APP ID SANITIZATION ---
 const getAppId = () => {
   let id = 'mind_the_gap_prod';
   if (typeof window !== 'undefined' && (window as any).__app_id) {
     id = (window as any).__app_id;
   }
-  // CRITICAL: Replace slashes and symbols with underscores to prevent DB path errors
   return id.replace(/[^a-zA-Z0-9]/g, '_');
 };
 const APP_ID = getAppId();
@@ -137,7 +133,7 @@ type Player = {
   hand: Card[];
   score: number;
   tunnelUsed: boolean;
-  cityHallConnected: boolean; // Track if they've used their 1 exit
+  cityHallConnected: boolean; 
   completedPassengers: string[];
 };
 type Tile = {
@@ -169,12 +165,11 @@ const shuffle = <T,>(array: T[]): T[] => {
   return [...array].sort(() => Math.random() - 0.5);
 };
 
-// Returns [N, E, S, W] booleans for connection possibility
 const getSegmentExits = (type: string, rot: number) => {
   if (type === 'tunnel') return { N:true, E:true, S:true, W:true }; 
   if (type === 'straight') {
-     if (rot === 0 || rot === 180) return { N:true, S:true, E:false, W:false }; // Vertical
-     return { N:false, S:false, E:true, W:true }; // Horizontal
+     if (rot === 0 || rot === 180) return { N:true, S:true, E:false, W:false }; 
+     return { N:false, S:false, E:true, W:true }; 
   }
   // Curve
   if (rot === 0) return { S:true, E:true, N:false, W:false };
@@ -212,8 +207,6 @@ export default function MindTheGap() {
   const [roomId, setRoomId] = useState('');
   const [playerName, setPlayerName] = useState('');
   const [gameState, setGameState] = useState<GameState | null>(null);
-  
-  // Selection States
   const [selectedCardIndices, setSelectedCardIndices] = useState<number[]>([]);
   const [actionMode, setActionMode] = useState<'build' | 'place' | 'tunnel' | null>(null);
   
@@ -243,7 +236,6 @@ export default function MindTheGap() {
         }
       } catch (err) {
         console.error("Auth Error:", err);
-        notify("Authentication Failed. Check console.");
       }
     };
     initAuth();
@@ -298,7 +290,6 @@ export default function MindTheGap() {
       await setDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'rooms', `room_${newRoomId}`), initialState);
       setRoomId(newRoomId);
     } catch (e: any) {
-      console.error("Create Room Error:", e);
       notify(`Failed to create room: ${e.message || e}`);
     }
   };
@@ -332,7 +323,6 @@ export default function MindTheGap() {
         });
       });
     } catch (e: any) {
-      console.error("Join Room Error:", e);
       notify(`Failed to join: ${e.message || e}`);
     }
   };
@@ -343,7 +333,6 @@ export default function MindTheGap() {
     await updateDoc(roomRef, { status: 'playing' });
   };
 
-  // --- LOGIC ---
   const getCurrentPlayer = () => gameState?.players[gameState.activePlayerIdx];
   const isMyTurn = () => getCurrentPlayer()?.id === user?.uid;
   const notify = (msg: string) => { setNotification(msg); setTimeout(() => setNotification(null), 3000); };
@@ -364,9 +353,7 @@ export default function MindTheGap() {
     if (curveStep || tunnelStage) {
         resetTurnState();
     }
-
     const isSelected = selectedCardIndices.includes(idx);
-    
     if (isSelected) {
       const newSelection = selectedCardIndices.filter(i => i !== idx);
       setSelectedCardIndices(newSelection);
@@ -383,9 +370,7 @@ export default function MindTheGap() {
         if (card?.type === 'landmark') setActionMode('place');
         else if (card?.type.startsWith('track')) {
              setActionMode('build');
-             if (card.type === 'track_curve') {
-                 setCurveStep('select_anchor'); // START NEW CURVE FLOW
-             }
+             if (card.type === 'track_curve') setCurveStep('select_anchor'); 
         }
       } else {
         setSelectedCardIndices(prev => [...prev, idx]);
@@ -395,7 +380,6 @@ export default function MindTheGap() {
     }
   };
 
-  // --- BOARD INTERACTION ---
   const handleTileClick = async (x: number, y: number) => {
     if (!isMyTurn() || !gameState || gameState.status !== 'playing' || !db) return;
     const player = getCurrentPlayer()!;
@@ -408,11 +392,9 @@ export default function MindTheGap() {
         const card = player.hand[cardIdx];
         if (card.type !== 'track_curve') return;
 
-        // Step 1: Select Anchor (Track End)
         if (curveStep === 'select_anchor') {
             let validAnchor = false;
             let exits = { N:true, S:true, E:true, W:true };
-
             if (tile?.landmark === 'CITY_HALL') {
                 if (player.cityHallConnected) { notify("City Hall exit already used!"); return; }
                 validAnchor = true;
@@ -423,101 +405,56 @@ export default function MindTheGap() {
             } else if (tile?.tunnelConnections?.[player.id]?.some(pt => pt.x === x && pt.y === y)) {
                 validAnchor = true;
             }
-
             if (!validAnchor) { notify("Click the END of your track to extend from."); return; }
 
             const options: {targetX:number, targetY:number, buildX:number, buildY:number, rot:number}[] = [];
-            
-            // Check all 4 neighbors of Anchor
-            const neighbors = [
-                { dx: 0, dy: -1, label: 'N', entry: 'S' }, 
-                { dx: 1, dy: 0, label: 'E', entry: 'W' },
-                { dx: 0, dy: 1, label: 'S', entry: 'N' },
-                { dx: -1, dy: 0, label: 'W', entry: 'E' }
-            ];
+            const neighbors = [{ dx: 0, dy: -1, label: 'N', entry: 'S' }, { dx: 1, dy: 0, label: 'E', entry: 'W' }, { dx: 0, dy: 1, label: 'S', entry: 'N' }, { dx: -1, dy: 0, label: 'W', entry: 'E' }];
 
             for (const n of neighbors) {
-                // 1. Can we exit anchor in this direction?
                 // @ts-ignore
                 if (!exits[n.label] && tile?.landmark !== 'CITY_HALL') continue;
-
                 const buildX = x + n.dx;
                 const buildY = y + n.dy;
                 const buildKey = getTileKey(buildX, buildY);
                 const buildTile = gameState.board[buildKey];
-
-                // 2. Is the build spot empty?
                 if (buildTile?.landmark) continue;
                 if (buildTile?.segments && buildTile.segments[player.id]) continue; 
 
-                // 3. Calculate "Target" Ghost Tiles (Left/Right turns)
-                // If entering BuildTile from 'entry', we can turn Left or Right.
                 const validRots: number[] = [];
-                if (n.entry === 'S') validRots.push(0, 90);      
-                if (n.entry === 'N') validRots.push(180, 270);   
-                if (n.entry === 'W') validRots.push(90, 180);    
-                if (n.entry === 'E') validRots.push(0, 270);     
-
+                if (n.entry === 'S') validRots.push(0, 90); if (n.entry === 'N') validRots.push(180, 270); if (n.entry === 'W') validRots.push(90, 180); if (n.entry === 'E') validRots.push(0, 270);     
                 validRots.forEach(rot => {
                     const curveExits = getSegmentExits('curve', rot);
-                    // Which exit is NOT the entry?
                     let exitDir = '';
-                    if (curveExits.N && n.entry !== 'N') exitDir = 'N';
-                    if (curveExits.S && n.entry !== 'S') exitDir = 'S';
-                    if (curveExits.E && n.entry !== 'E') exitDir = 'E';
-                    if (curveExits.W && n.entry !== 'W') exitDir = 'W';
-
+                    if (curveExits.N && n.entry !== 'N') exitDir = 'N'; if (curveExits.S && n.entry !== 'S') exitDir = 'S'; if (curveExits.E && n.entry !== 'E') exitDir = 'E'; if (curveExits.W && n.entry !== 'W') exitDir = 'W';
                     let targetX = buildX, targetY = buildY;
-                    if (exitDir === 'N') targetY--;
-                    if (exitDir === 'S') targetY++;
-                    if (exitDir === 'E') targetX++;
-                    if (exitDir === 'W') targetX--;
-                    
-                    // Check if Target tile is valid (doesn't have to be empty, just valid coordinate)
-                    if (targetX >= 0 && targetX < GRID_SIZE && targetY >= 0 && targetY < GRID_SIZE) {
-                        options.push({ targetX, targetY, buildX, buildY, rot });
-                    }
+                    if (exitDir === 'N') targetY--; if (exitDir === 'S') targetY++; if (exitDir === 'E') targetX++; if (exitDir === 'W') targetX--;
+                    if (targetX >= 0 && targetX < GRID_SIZE && targetY >= 0 && targetY < GRID_SIZE) options.push({ targetX, targetY, buildX, buildY, rot });
                 });
             }
-            
             if (options.length === 0) { notify("No room for a curve here!"); return; }
-
             setCurveAnchor({x, y});
             setCurveOptions(options);
             setCurveStep('select_direction');
             return;
         }
 
-        // Step 2: Select Direction Ghost
         if (curveStep === 'select_direction') {
             const opt = curveOptions.find(o => o.targetX === x && o.targetY === y);
             if (!opt) {
-                if (x === curveAnchor?.x && y === curveAnchor?.y) {
-                    setCurveStep('select_anchor');
-                    setCurveOptions([]);
-                    return;
-                }
-                notify("Click a highlighted destination tile to curve towards.");
-                return;
+                if (x === curveAnchor?.x && y === curveAnchor?.y) { setCurveStep('select_anchor'); setCurveOptions([]); return; }
+                notify("Click a highlighted destination tile to curve towards."); return;
             }
-
-            // Build Logic
             const roomRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'rooms', `room_${roomId}`);
             const { newHand, newMarket } = drawCard('track', player.hand.filter((_, i) => i !== cardIdx), gameState.market);
-            
             let connectedToCityHall = player.cityHallConnected;
             if (Math.abs(opt.buildX - CENTER) + Math.abs(opt.buildY - CENTER) === 1) connectedToCityHall = true;
-
             const bKey = getTileKey(opt.buildX, opt.buildY);
-
             await runTransaction(db, async (t) => {
                 const sfDoc = await t.get(roomRef);
                 const currentState = sfDoc.data() as GameState;
                 const b = { ...currentState.board };
-                
                 if (!b[bKey]) b[bKey] = { x: opt.buildX, y: opt.buildY, segments: {} };
                 b[bKey].segments = { ...b[bKey].segments, [player.id]: { type: 'curve', rot: opt.rot } };
-
                 t.update(roomRef, {
                     [`board.${bKey}`]: b[bKey],
                     players: currentState.players.map(p => p.id === player.id ? { ...p, hand: newHand, cityHallConnected: connectedToCityHall } : p),
@@ -530,50 +467,37 @@ export default function MindTheGap() {
         return;
     }
 
-    // --- TUNNEL (Flexible Distance) ---
     if (actionMode === 'tunnel') {
         if (!tunnelStage || tunnelStage === 'select_start') {
             if (tile?.landmark === 'CITY_HALL' || tile?.segments?.[player.id]) {
                 setTunnelStart({ x, y });
                 setTunnelStage('select_end');
                 notify("Select ANY tunnel exit in a straight line");
-            } else {
-                notify("Start tunnel at your existing track!");
-            }
+            } else { notify("Start tunnel at your existing track!"); }
         } else if (tunnelStage === 'select_end' && tunnelStart) {
             const dx = x - tunnelStart.x;
             const dy = y - tunnelStart.y;
-            
-            // Check Straight Line
             if (dx === 0 && dy === 0) return; 
             if (dx !== 0 && dy !== 0) { notify("Tunnel must be a straight line!"); return; }
-
-            // Check if end is occupied
             if (tile?.segments && Object.keys(tile.segments).length > 0) { notify("Exit blocked!"); return; }
             if (tile?.landmark) { notify("Cannot tunnel into landmark directly!"); return; }
-
             const roomRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'rooms', `room_${roomId}`);
             await runTransaction(db, async (t) => {
                  const cur = (await t.get(roomRef)).data() as GameState;
                  const b = { ...cur.board };
-                 
                  const k = getTileKey(x, y);
                  if (!b[k]) b[k] = { x, y, segments: {} };
                  b[k].segments = { ...b[k].segments, [player.id]: { type: 'straight', rot: (dx!==0 ? 90 : 0) } };
-
                  const anchorKey = getTileKey(tunnelStart.x, tunnelStart.y);
                  if (!b[anchorKey]) b[anchorKey] = { x: tunnelStart.x, y: tunnelStart.y, segments: {} };
-                 
                  const addConn = (k: string, tx: number, ty: number) => {
                      const conns = b[k].tunnelConnections || {};
                      const pConns = conns[player.id] || [];
                      pConns.push({ x: tx, y: ty });
                      b[k].tunnelConnections = { ...conns, [player.id]: pConns };
                  };
-
                  addConn(k, tunnelStart.x, tunnelStart.y);
                  addConn(anchorKey, x, y);
-
                  t.update(roomRef, {
                      board: b,
                      players: cur.players.map(p => p.id === player.id ? { ...p, tunnelUsed: true } : p),
@@ -585,18 +509,14 @@ export default function MindTheGap() {
         return;
     }
 
-    // --- PLACE LANDMARK (Max 2 Conns Rule) ---
     if (actionMode === 'place' && selectedCardIndices.length === 1) {
       const cardIdx = selectedCardIndices[0];
       const card = player.hand[cardIdx];
-      
       if (tile?.landmark) { notify("Tile occupied!"); return; }
       if (tile?.segments && Object.keys(tile.segments).length > 0) { notify("Track here!"); return; }
-      
       let trackCount = 0;
       Object.values(gameState.board).forEach(t => { if(t.segments?.[player.id]) trackCount++; });
       if (trackCount < 3) { notify("You need 3 tracks before placing a landmark!"); return; }
-
       let nearNetwork = false;
       for (let dx = -3; dx <= 3; dx++) {
         for (let dy = -3; dy <= 3; dy++) {
@@ -606,7 +526,6 @@ export default function MindTheGap() {
         if (nearNetwork) break;
       }
       if (!nearNetwork) { notify("Must be within 3 tiles of your network!"); return; }
-
       for(let dx=-1; dx<=1; dx++) {
           for(let dy=-1; dy<=1; dy++) {
               if (dx===0 && dy===0) continue;
@@ -614,12 +533,10 @@ export default function MindTheGap() {
               if (t?.landmark) { notify("Too close to another landmark!"); return; }
           }
       }
-
       const roomRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'rooms', `room_${roomId}`);
       const { newHand, newMarket } = drawCard('landmark', player.hand.filter((_, i) => i !== cardIdx), gameState.market);
       const newBoard = { ...gameState.board };
       newBoard[key] = { x, y, landmark: card.landmarkId, segments: {} };
-
       await updateDoc(roomRef, {
         [`board.${key}`]: newBoard[key],
         players: gameState.players.map(p => p.id === player.id ? { ...p, hand: newHand } : p),
@@ -629,39 +546,25 @@ export default function MindTheGap() {
       resetTurnState();
     }
 
-    // --- BUILD STRAIGHT ---
     if (actionMode === 'build' && selectedCardIndices.length === 1 && !curveStep) {
         const cardIdx = selectedCardIndices[0];
         const card = player.hand[cardIdx];
         if (card.type !== 'track_straight') return; 
-
         if (tile?.landmark && tile.landmark !== 'CITY_HALL') { notify("Cannot build on landmark!"); return; }
         if (tile?.segments && Object.values(tile.segments).some(s => s)) { notify("Tile occupied!"); return; }
-
-        const neighbors = [
-          { dx: 0, dy: -1, dir: 'N' }, 
-          { dx: 1, dy: 0, dir: 'E' },
-          { dx: 0, dy: 1, dir: 'S' }, 
-          { dx: -1, dy: 0, dir: 'W' }
-        ];
-
+        const neighbors = [{ dx: 0, dy: -1, dir: 'N' }, { dx: 1, dy: 0, dir: 'E' }, { dx: 0, dy: 1, dir: 'S' }, { dx: -1, dy: 0, dir: 'W' }];
         let validAnchor = false;
         let entryDir: 'N'|'E'|'S'|'W' = 'N';
-
         for (const n of neighbors) {
           const nk = getTileKey(x + n.dx, y + n.dy);
           const neighbor = gameState.board[nk];
           if (!neighbor) continue;
-
           const reqExit = getOppositeDir(n.dir as any); 
-          
           let hasExit = false;
           if (neighbor.landmark === 'CITY_HALL') {
              if (player.cityHallConnected) continue; 
              hasExit = true; 
           } else if (neighbor.landmark) {
-             // Landmark Logic: Hub
-             // Allow connection if < 2 connections exist for me
              let connCount = 0;
              const neighborNeighbors = [{dx:0,dy:-1}, {dx:1,dy:0}, {dx:0,dy:1}, {dx:-1,dy:0}];
              neighborNeighbors.forEach(nn => {
@@ -678,34 +581,21 @@ export default function MindTheGap() {
           } else if (neighbor.tunnelConnections?.[player.id]?.some(pt => pt.x === x && pt.y === y)) {
              hasExit = true;
           }
-
-          if (hasExit) {
-             validAnchor = true;
-             entryDir = n.dir as any;
-             break;
-          }
+          if (hasExit) { validAnchor = true; entryDir = n.dir as any; break; }
         }
-
         if (!validAnchor) { notify("Must connect to an open track edge!"); return; }
-
         let rot = 0;
-        if (entryDir === 'N' || entryDir === 'S') rot = 0; 
-        else rot = 90; 
-
+        if (entryDir === 'N' || entryDir === 'S') rot = 0; else rot = 90; 
         const roomRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'rooms', `room_${roomId}`);
         const { newHand, newMarket } = drawCard('track', player.hand.filter((_, i) => i !== cardIdx), gameState.market);
-        
         let connectedToCityHall = player.cityHallConnected;
         if (Math.abs(x - CENTER) + Math.abs(y - CENTER) === 1) connectedToCityHall = true;
-
         await runTransaction(db, async (t) => {
             const sfDoc = await t.get(roomRef);
             const currentState = sfDoc.data() as GameState;
             const b = { ...currentState.board };
-            
             if (!b[key]) b[key] = { x, y, segments: {} };
             b[key].segments = { ...b[key].segments, [player.id]: { type: 'straight', rot } };
-
             t.update(roomRef, {
                 [`board.${key}`]: b[key],
                 players: currentState.players.map(p => p.id === player.id ? { ...p, hand: newHand, cityHallConnected: connectedToCityHall } : p),
@@ -718,28 +608,23 @@ export default function MindTheGap() {
   };
 
   const handleSwap = async () => {
-      if (!isMyTurn() || selectedCardIndices.length === 0) { notify("Select cards to swap first"); return; }
+      if (!db || !isMyTurn() || selectedCardIndices.length === 0) { notify("Select cards to swap first"); return; }
       const player = getCurrentPlayer()!;
       const roomRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'rooms', `room_${roomId}`);
-
       let tracksToDraw = 0;
       let landmarksToDraw = 0;
-
       selectedCardIndices.forEach(idx => {
           if (player.hand[idx].type === 'landmark') landmarksToDraw++;
           else tracksToDraw++;
       });
-
       const remainingHand = player.hand.filter((_, i) => !selectedCardIndices.includes(i));
       const decks = { ...gameState!.market };
-      
       const newHand = [...remainingHand];
       for(let i=0; i<tracksToDraw; i++) newHand.push({ id: `t_${Math.random()}`, type: Math.random()>0.5 ? 'track_straight':'track_curve' });
       for(let i=0; i<landmarksToDraw; i++) {
           const l = decks.deckLandmarks.pop();
           if(l) newHand.push({ id: l, type: 'landmark', landmarkId: l });
       }
-
       await updateDoc(roomRef, {
            players: gameState!.players.map(p => p.id === player.id ? { ...p, hand: newHand } : p),
            market: decks,
@@ -758,17 +643,11 @@ export default function MindTheGap() {
       setTunnelStart(null);
   };
 
-  // --- PATHFINDING & SCORING ---
-  // Runs on every update to check if user completed a passenger
+  // --- PATHFINDING ---
   useEffect(() => {
     if (!gameState || gameState.status !== 'playing' || !db) return;
     const player = gameState.players.find(p => p.id === user?.uid);
     if (!player) return;
-
-    // Build Graph for Player
-    // Nodes: "x,y" strings.
-    // Edges: Adjacency. Landmarks act as bridges.
-    
     const graph = new Map<string, string[]>();
     const addEdge = (a: string, b: string) => {
         if (!graph.has(a)) graph.set(a, []);
@@ -776,25 +655,20 @@ export default function MindTheGap() {
         graph.get(a)!.push(b);
         graph.get(b)!.push(a);
     };
-
-    // 1. Process Tracks
     Object.values(gameState.board).forEach(t => {
         const key = getTileKey(t.x, t.y);
         if (t.segments && t.segments[player.id]) {
-            // Check connections based on type/rot
             const seg = t.segments[player.id];
             const exits = getSegmentExits(seg.type, seg.rot);
             const dirs = [{dx:0,dy:-1,l:'N',o:'S'}, {dx:1,dy:0,l:'E',o:'W'}, {dx:0,dy:1,l:'S',o:'N'}, {dx:-1,dy:0,l:'W',o:'E'}];
-            
             dirs.forEach(d => {
                 // @ts-ignore
                 if (exits[d.l]) {
                     const nk = getTileKey(t.x+d.dx, t.y+d.dy);
                     const nt = gameState.board[nk];
                     if (!nt) return;
-                    
                     let connects = false;
-                    // Standard Track-Track connection
+                    if (nt.landmark) connects = true;
                     if (nt.segments?.[player.id]) {
                         const nSeg = nt.segments[player.id];
                         const nExits = getSegmentExits(nSeg.type, nSeg.rot);
@@ -802,14 +676,11 @@ export default function MindTheGap() {
                         if (nExits[d.o]) connects = true;
                     }
                     if (nt.tunnelConnections?.[player.id]?.some(pt => pt.x === t.x && pt.y === t.y)) connects = true;
-
                     if (connects) addEdge(key, nk);
                 }
             });
         }
     });
-
-    // 2. Process Tunnels
     Object.values(gameState.board).forEach(t => {
         if (t.tunnelConnections?.[player.id]) {
             t.tunnelConnections[player.id].forEach(pt => {
@@ -817,16 +688,10 @@ export default function MindTheGap() {
             });
         }
     });
-
-    // 3. Process Landmarks (Bridge Logic)
-    // Landmarks don't live on the graph themselves, they CONNECT tracks.
-    // Find all tracks touching a specific landmark and connect them to each other.
     Object.values(gameState.board).forEach(lTile => {
         if (lTile.landmark && lTile.landmark !== 'CITY_HALL') {
-            // Find neighbors with tracks pointing to this landmark
             const tracksTouching: string[] = [];
             const dirs = [{dx:0,dy:-1,req:'S'}, {dx:1,dy:0,req:'W'}, {dx:0,dy:1,req:'N'}, {dx:-1,dy:0,req:'E'}];
-            
             dirs.forEach(d => {
                 const nk = getTileKey(lTile.x+d.dx, lTile.y+d.dy);
                 const nt = gameState.board[nk];
@@ -834,13 +699,9 @@ export default function MindTheGap() {
                     const seg = nt.segments[player.id];
                     const exits = getSegmentExits(seg.type, seg.rot);
                     // @ts-ignore
-                    if (exits[d.req]) {
-                        tracksTouching.push(nk);
-                    }
+                    if (exits[d.req]) tracksTouching.push(nk);
                 }
             });
-
-            // Bridge them all!
             if (tracksTouching.length > 1) {
                 for(let i=0; i<tracksTouching.length; i++) {
                     for(let j=i+1; j<tracksTouching.length; j++) {
@@ -850,24 +711,16 @@ export default function MindTheGap() {
             }
         }
     });
-
-    // 4. BFS for Passengers
     const activePassengers = gameState.market.passengers.map(pid => PASSENGERS.find(p => p.id === pid)).filter(p => p);
-    
     activePassengers.forEach(passenger => {
         if (!passenger) return;
-        
-        // Find Start NODES (Tracks next to Start Landmark)
-        // Find End NODES (Tracks next to End Landmark)
         const getLandmarkNodes = (targetId: string | undefined, targetCat: string | undefined) => {
             const nodes: string[] = [];
             Object.values(gameState.board).forEach(t => {
                 if (!t.landmark || t.landmark === 'CITY_HALL') return;
                 const l = LANDMARK_DATA.find(ld => ld.id === t.landmark);
                 if (!l) return;
-
                 if (targetId === l.id || (targetCat && l.cat === targetCat)) {
-                    // Found a valid landmark. Now find tracks connected to it.
                     const dirs = [{dx:0,dy:-1,req:'S'}, {dx:1,dy:0,req:'W'}, {dx:0,dy:1,req:'N'}, {dx:-1,dy:0,req:'E'}];
                     dirs.forEach(d => {
                         const nk = getTileKey(t.x+d.dx, t.y+d.dy);
@@ -883,11 +736,8 @@ export default function MindTheGap() {
             });
             return nodes;
         };
-
         const startNodes = getLandmarkNodes(passenger.from, passenger.fromCat);
         const endNodes = getLandmarkNodes(passenger.to, passenger.toCat);
-
-        // Search
         let found = false;
         for (const start of startNodes) {
             const q = [start];
@@ -897,15 +747,11 @@ export default function MindTheGap() {
                 if (endNodes.includes(curr)) { found = true; break; }
                 const neighbors = graph.get(curr) || [];
                 for (const n of neighbors) {
-                    if (!visited.has(n)) {
-                        visited.add(n);
-                        q.push(n);
-                    }
+                    if (!visited.has(n)) { visited.add(n); q.push(n); }
                 }
             }
             if (found) break;
         }
-
         if (found) {
             if (gameState.activePlayerIdx === player.colorIdx && !player.completedPassengers.includes(passenger.id)) {
                  const claim = async () => {
@@ -913,16 +759,13 @@ export default function MindTheGap() {
                      await runTransaction(db, async (t) => {
                          const sf = (await t.get(roomRef)).data() as GameState;
                          if (!sf.market.passengers.includes(passenger.id)) return;
-                         
                          const newPas = sf.market.passengers.filter(id => id !== passenger.id);
                          if (sf.market.deckPassengers.length > 0) newPas.push(sf.market.deckPassengers.pop()!);
-                         
-                         const pts = 2; // Simplified points
+                         const pts = 2; 
                          const newPlayers = sf.players.map(p => {
                              if (p.id === player.id) return { ...p, score: p.score + pts, completedPassengers: [...p.completedPassengers, passenger.id] };
                              return p;
                          });
-                         
                          t.update(roomRef, {
                              'market.passengers': newPas,
                              'market.deckPassengers': sf.market.deckPassengers,
@@ -935,7 +778,6 @@ export default function MindTheGap() {
             }
         }
     });
-
   }, [gameState, user]);
 
   // --- RENDER ---
