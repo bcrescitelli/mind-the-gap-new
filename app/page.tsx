@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { initializeApp } from 'firebase/app';
+import { initializeApp, getApps, getApp } from 'firebase/app';
 import { 
   getFirestore, doc, setDoc, onSnapshot, updateDoc, 
   arrayUnion, runTransaction
@@ -15,7 +15,48 @@ import {
   RotateCw, Check, X, MoveRight, CornerUpRight, ArrowUp
 } from 'lucide-react';
 
-// --- CONFIGURATION ---
+// --- FIREBASE CONFIGURATION ---
+const getFirebaseConfig = () => {
+  // 1. Check for preview environment config
+  if (typeof window !== 'undefined' && (window as any).__firebase_config) {
+    try {
+      return JSON.parse((window as any).__firebase_config);
+    } catch (e) {
+      console.error("Config parse error", e);
+    }
+  }
+  // 2. Check for Vercel environment config
+  if (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_FIREBASE_API_KEY) {
+    return {
+      apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+      authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+      projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+      storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
+      messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+      appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID
+    };
+  }
+  return {};
+};
+
+const firebaseConfig = getFirebaseConfig();
+// Only initialize if we have a config, otherwise wait
+const app = (!getApps().length && firebaseConfig.apiKey) ? initializeApp(firebaseConfig) : (getApps().length ? getApp() : null);
+const auth = app ? getAuth(app) : null;
+const db = app ? getFirestore(app) : null;
+
+// --- APP ID SANITIZATION (The Fix) ---
+const getAppId = () => {
+  let id = 'mind_the_gap_prod';
+  if (typeof window !== 'undefined' && (window as any).__app_id) {
+    id = (window as any).__app_id;
+  }
+  // CRITICAL: Replace slashes and symbols with underscores to prevent DB path errors
+  return id.replace(/[^a-zA-Z0-9]/g, '_');
+};
+const APP_ID = getAppId();
+
+// --- GAME CONFIGURATION ---
 
 const GRID_SIZE = 21;
 const CENTER = 10;
@@ -96,7 +137,7 @@ type Player = {
   hand: Card[];
   score: number;
   tunnelUsed: boolean;
-  cityHallConnected: boolean; 
+  cityHallConnected: boolean; // Track if they've used their 1 exit
   completedPassengers: string[];
 };
 type Tile = {
@@ -119,23 +160,6 @@ type GameState = {
   };
   winner?: string;
 };
-
-// --- FIREBASE SETUP ---
-const firebaseConfig = {
-  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID
-};
-
-// --- INITIALIZE FIREBASE (These are the missing lines!) ---
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const APP_ID = 'mind_the_gap_prod';
-
 
 // --- HELPER FUNCTIONS ---
 
@@ -209,11 +233,17 @@ export default function MindTheGap() {
 
   // AUTH
   useEffect(() => {
+    if (!auth) return;
     const initAuth = async () => {
-      if (typeof window !== 'undefined' && (window as any).__initial_auth_token) {
-        await signInWithCustomToken(auth, (window as any).__initial_auth_token);
-      } else {
-        await signInAnonymously(auth);
+      try {
+        if (typeof window !== 'undefined' && (window as any).__initial_auth_token) {
+          await signInWithCustomToken(auth, (window as any).__initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth Error:", err);
+        notify("Authentication Failed. Check console.");
       }
     };
     initAuth();
@@ -223,7 +253,7 @@ export default function MindTheGap() {
 
   // SYNC
   useEffect(() => {
-    if (!user || !roomId) return;
+    if (!user || !roomId || !db) return;
     const roomRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'rooms', `room_${roomId}`);
     return onSnapshot(roomRef, (snap) => {
       if (snap.exists()) setGameState(snap.data() as GameState);
@@ -233,71 +263,82 @@ export default function MindTheGap() {
 
   // ACTIONS
   const createRoom = async () => {
-    if (!user || !playerName) return;
-    const newRoomId = Math.random().toString(36).substring(2, 6).toUpperCase();
-    const decks = createDeck();
-    const hand: Card[] = [];
-    for(let i=0; i<3; i++) hand.push({ id: `t_${Math.random()}`, type: Math.random() > 0.5 ? 'track_straight' : 'track_curve' });
-    for(let i=0; i<2; i++) {
-      const lid = decks.landmarks.pop();
-      if(lid) hand.push({ id: lid, type: 'landmark', landmarkId: lid });
-    }
-
-    const initialState: GameState = {
-      status: 'lobby',
-      activePlayerIdx: 0,
-      players: [{
-        id: user.uid,
-        name: playerName,
-        colorIdx: 0,
-        hand,
-        score: 0,
-        tunnelUsed: false,
-        cityHallConnected: false,
-        completedPassengers: []
-      }],
-      board: initialBoard(),
-      market: {
-        passengers: decks.passengers.splice(0, 3),
-        deckTracks: 100,
-        deckLandmarks: decks.landmarks,
-        deckPassengers: decks.passengers
-      }
-    };
-    await setDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'rooms', `room_${newRoomId}`), initialState);
-    setRoomId(newRoomId);
-  };
-
-  const joinRoom = async () => {
-    if (!user || !playerName || !roomId) return;
-    const roomRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'rooms', `room_${roomId}`);
-    await runTransaction(db, async (transaction) => {
-      const sfDoc = await transaction.get(roomRef);
-      if (!sfDoc.exists()) throw "Room does not exist!";
-      const state = sfDoc.data() as GameState;
-      if (state.status !== 'lobby') throw "Game already started";
-      if (state.players.length >= 4) throw "Room full";
-      if (state.players.some(p => p.id === user.uid)) return;
-
-      const decks = { ...state.market };
+    try {
+      if (!user || !playerName || !db) return;
+      const newRoomId = Math.random().toString(36).substring(2, 6).toUpperCase();
+      const decks = createDeck();
       const hand: Card[] = [];
       for(let i=0; i<3; i++) hand.push({ id: `t_${Math.random()}`, type: Math.random() > 0.5 ? 'track_straight' : 'track_curve' });
       for(let i=0; i<2; i++) {
-        const lid = decks.deckLandmarks.pop();
+        const lid = decks.landmarks.pop();
         if(lid) hand.push({ id: lid, type: 'landmark', landmarkId: lid });
       }
 
-      transaction.update(roomRef, {
-        players: arrayUnion({
-          id: user.uid, name: playerName, colorIdx: state.players.length,
-          hand, score: 0, tunnelUsed: false, cityHallConnected: false, completedPassengers: []
-        }),
-        market: decks
+      const initialState: GameState = {
+        status: 'lobby',
+        activePlayerIdx: 0,
+        players: [{
+          id: user.uid,
+          name: playerName,
+          colorIdx: 0,
+          hand,
+          score: 0,
+          tunnelUsed: false,
+          cityHallConnected: false,
+          completedPassengers: []
+        }],
+        board: initialBoard(),
+        market: {
+          passengers: decks.passengers.splice(0, 3),
+          deckTracks: 100,
+          deckLandmarks: decks.landmarks,
+          deckPassengers: decks.passengers
+        }
+      };
+      await setDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'rooms', `room_${newRoomId}`), initialState);
+      setRoomId(newRoomId);
+    } catch (e: any) {
+      console.error("Create Room Error:", e);
+      notify(`Failed to create room: ${e.message || e}`);
+    }
+  };
+
+  const joinRoom = async () => {
+    try {
+      if (!user || !playerName || !roomId || !db) return;
+      const roomRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'rooms', `room_${roomId}`);
+      await runTransaction(db, async (transaction) => {
+        const sfDoc = await transaction.get(roomRef);
+        if (!sfDoc.exists()) throw "Room does not exist!";
+        const state = sfDoc.data() as GameState;
+        if (state.status !== 'lobby') throw "Game already started";
+        if (state.players.length >= 4) throw "Room full";
+        if (state.players.some(p => p.id === user.uid)) return;
+
+        const decks = { ...state.market };
+        const hand: Card[] = [];
+        for(let i=0; i<3; i++) hand.push({ id: `t_${Math.random()}`, type: Math.random() > 0.5 ? 'track_straight' : 'track_curve' });
+        for(let i=0; i<2; i++) {
+          const lid = decks.deckLandmarks.pop();
+          if(lid) hand.push({ id: lid, type: 'landmark', landmarkId: lid });
+        }
+
+        transaction.update(roomRef, {
+          players: arrayUnion({
+            id: user.uid, name: playerName, colorIdx: state.players.length,
+            hand, score: 0, tunnelUsed: false, cityHallConnected: false, completedPassengers: []
+          }),
+          market: decks
+        });
       });
-    });
+    } catch (e: any) {
+      console.error("Join Room Error:", e);
+      notify(`Failed to join: ${e.message || e}`);
+    }
   };
 
   const startGame = async () => {
+    if (!db) return;
     const roomRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'rooms', `room_${roomId}`);
     await updateDoc(roomRef, { status: 'playing' });
   };
@@ -343,7 +384,7 @@ export default function MindTheGap() {
         else if (card?.type.startsWith('track')) {
              setActionMode('build');
              if (card.type === 'track_curve') {
-                 setCurveStep('select_anchor'); 
+                 setCurveStep('select_anchor'); // START NEW CURVE FLOW
              }
         }
       } else {
@@ -356,12 +397,12 @@ export default function MindTheGap() {
 
   // --- BOARD INTERACTION ---
   const handleTileClick = async (x: number, y: number) => {
-    if (!isMyTurn() || !gameState || gameState.status !== 'playing') return;
+    if (!isMyTurn() || !gameState || gameState.status !== 'playing' || !db) return;
     const player = getCurrentPlayer()!;
     const key = getTileKey(x, y);
     const tile = gameState.board[key];
 
-    // --- CURVE FLOW (Improved) ---
+    // --- CURVE FLOW ---
     if (actionMode === 'build' && curveStep) {
         const cardIdx = selectedCardIndices[0];
         const card = player.hand[cardIdx];
@@ -489,13 +530,13 @@ export default function MindTheGap() {
         return;
     }
 
-    // --- TUNNEL (Any Distance Straight) ---
+    // --- TUNNEL (Flexible Distance) ---
     if (actionMode === 'tunnel') {
         if (!tunnelStage || tunnelStage === 'select_start') {
             if (tile?.landmark === 'CITY_HALL' || tile?.segments?.[player.id]) {
                 setTunnelStart({ x, y });
                 setTunnelStage('select_end');
-                notify("Select tunnel exit (Any straight line)");
+                notify("Select ANY tunnel exit in a straight line");
             } else {
                 notify("Start tunnel at your existing track!");
             }
@@ -504,11 +545,10 @@ export default function MindTheGap() {
             const dy = y - tunnelStart.y;
             
             // Check Straight Line
+            if (dx === 0 && dy === 0) return; 
             if (dx !== 0 && dy !== 0) { notify("Tunnel must be a straight line!"); return; }
-            if (dx === 0 && dy === 0) return; // Clicked self
 
-            // Check Obstructions? Prompt said "move anywhere". I interpret as "Underground" so ignores tracks.
-            // Check Destination Occupancy
+            // Check if end is occupied
             if (tile?.segments && Object.keys(tile.segments).length > 0) { notify("Exit blocked!"); return; }
             if (tile?.landmark) { notify("Cannot tunnel into landmark directly!"); return; }
 
@@ -721,7 +761,7 @@ export default function MindTheGap() {
   // --- PATHFINDING & SCORING ---
   // Runs on every update to check if user completed a passenger
   useEffect(() => {
-    if (!gameState || gameState.status !== 'playing') return;
+    if (!gameState || gameState.status !== 'playing' || !db) return;
     const player = gameState.players.find(p => p.id === user?.uid);
     if (!player) return;
 
@@ -744,7 +784,6 @@ export default function MindTheGap() {
             // Check connections based on type/rot
             const seg = t.segments[player.id];
             const exits = getSegmentExits(seg.type, seg.rot);
-            // Connect to neighbors if they reciprocate OR are landmarks/tunnels
             const dirs = [{dx:0,dy:-1,l:'N',o:'S'}, {dx:1,dy:0,l:'E',o:'W'}, {dx:0,dy:1,l:'S',o:'N'}, {dx:-1,dy:0,l:'W',o:'E'}];
             
             dirs.forEach(d => {
@@ -755,7 +794,7 @@ export default function MindTheGap() {
                     if (!nt) return;
                     
                     let connects = false;
-                    if (nt.landmark) connects = true; // Landmarks accept all
+                    // Standard Track-Track connection
                     if (nt.segments?.[player.id]) {
                         const nSeg = nt.segments[player.id];
                         const nExits = getSegmentExits(nSeg.type, nSeg.rot);
@@ -779,31 +818,74 @@ export default function MindTheGap() {
         }
     });
 
-    // 3. Process Landmarks (Bridge logic is handled by implicit adjacency above)
-    // If a track points to a landmark, it adds edge Track <-> Landmark.
-    // So if Track A -> Landmark <- Track B, then A-L-B path exists.
+    // 3. Process Landmarks (Bridge Logic)
+    // Landmarks don't live on the graph themselves, they CONNECT tracks.
+    // Find all tracks touching a specific landmark and connect them to each other.
+    Object.values(gameState.board).forEach(lTile => {
+        if (lTile.landmark && lTile.landmark !== 'CITY_HALL') {
+            // Find neighbors with tracks pointing to this landmark
+            const tracksTouching: string[] = [];
+            const dirs = [{dx:0,dy:-1,req:'S'}, {dx:1,dy:0,req:'W'}, {dx:0,dy:1,req:'N'}, {dx:-1,dy:0,req:'E'}];
+            
+            dirs.forEach(d => {
+                const nk = getTileKey(lTile.x+d.dx, lTile.y+d.dy);
+                const nt = gameState.board[nk];
+                if (nt?.segments?.[player.id]) {
+                    const seg = nt.segments[player.id];
+                    const exits = getSegmentExits(seg.type, seg.rot);
+                    // @ts-ignore
+                    if (exits[d.req]) {
+                        tracksTouching.push(nk);
+                    }
+                }
+            });
+
+            // Bridge them all!
+            if (tracksTouching.length > 1) {
+                for(let i=0; i<tracksTouching.length; i++) {
+                    for(let j=i+1; j<tracksTouching.length; j++) {
+                        addEdge(tracksTouching[i], tracksTouching[j]);
+                    }
+                }
+            }
+        }
+    });
 
     // 4. BFS for Passengers
     const activePassengers = gameState.market.passengers.map(pid => PASSENGERS.find(p => p.id === pid)).filter(p => p);
     
     activePassengers.forEach(passenger => {
         if (!passenger) return;
-        // Find Start Nodes
-        const startNodes: string[] = [];
-        const endNodes: string[] = [];
+        
+        // Find Start NODES (Tracks next to Start Landmark)
+        // Find End NODES (Tracks next to End Landmark)
+        const getLandmarkNodes = (targetId: string | undefined, targetCat: string | undefined) => {
+            const nodes: string[] = [];
+            Object.values(gameState.board).forEach(t => {
+                if (!t.landmark || t.landmark === 'CITY_HALL') return;
+                const l = LANDMARK_DATA.find(ld => ld.id === t.landmark);
+                if (!l) return;
 
-        Object.values(gameState.board).forEach(t => {
-            if (!t.landmark || t.landmark === 'CITY_HALL') return;
-            const l = LANDMARK_DATA.find(ld => ld.id === t.landmark);
-            if (!l) return;
+                if (targetId === l.id || (targetCat && l.cat === targetCat)) {
+                    // Found a valid landmark. Now find tracks connected to it.
+                    const dirs = [{dx:0,dy:-1,req:'S'}, {dx:1,dy:0,req:'W'}, {dx:0,dy:1,req:'N'}, {dx:-1,dy:0,req:'E'}];
+                    dirs.forEach(d => {
+                        const nk = getTileKey(t.x+d.dx, t.y+d.dy);
+                        const nt = gameState.board[nk];
+                        if (nt?.segments?.[player.id]) {
+                            const seg = nt.segments[player.id];
+                            const exits = getSegmentExits(seg.type, seg.rot);
+                            // @ts-ignore
+                            if (exits[d.req]) nodes.push(nk);
+                        }
+                    });
+                }
+            });
+            return nodes;
+        };
 
-            // Check if this landmark is connected to graph
-            const k = getTileKey(t.x, t.y);
-            if (!graph.has(k)) return; 
-
-            if (passenger.from === l.id || (passenger.fromCat && l.cat === passenger.fromCat)) startNodes.push(k);
-            if (passenger.to === l.id || (passenger.toCat && l.cat === passenger.toCat)) endNodes.push(k);
-        });
+        const startNodes = getLandmarkNodes(passenger.from, passenger.fromCat);
+        const endNodes = getLandmarkNodes(passenger.to, passenger.toCat);
 
         // Search
         let found = false;
@@ -825,15 +907,12 @@ export default function MindTheGap() {
         }
 
         if (found) {
-            // Claim!
-            // We need to execute claim on DB. Guard to ensure we don't spam.
             if (gameState.activePlayerIdx === player.colorIdx && !player.completedPassengers.includes(passenger.id)) {
-                 // Trigger claim transaction
                  const claim = async () => {
                      const roomRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'rooms', `room_${roomId}`);
                      await runTransaction(db, async (t) => {
                          const sf = (await t.get(roomRef)).data() as GameState;
-                         if (!sf.market.passengers.includes(passenger.id)) return; // Already claimed
+                         if (!sf.market.passengers.includes(passenger.id)) return;
                          
                          const newPas = sf.market.passengers.filter(id => id !== passenger.id);
                          if (sf.market.deckPassengers.length > 0) newPas.push(sf.market.deckPassengers.pop()!);
@@ -1103,4 +1182,3 @@ export default function MindTheGap() {
     </div>
   );
 }
-
